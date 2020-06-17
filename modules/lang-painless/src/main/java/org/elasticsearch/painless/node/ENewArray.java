@@ -19,99 +19,93 @@
 
 package org.elasticsearch.painless.node;
 
-import org.elasticsearch.painless.Definition;
-import org.elasticsearch.painless.Definition.Type;
-import org.elasticsearch.painless.Globals;
-import org.elasticsearch.painless.Locals;
+import org.elasticsearch.painless.AnalyzerCaster;
 import org.elasticsearch.painless.Location;
-import org.elasticsearch.painless.MethodWriter;
+import org.elasticsearch.painless.Scope;
+import org.elasticsearch.painless.ir.ClassNode;
+import org.elasticsearch.painless.ir.NewArrayNode;
+import org.elasticsearch.painless.lookup.PainlessCast;
+import org.elasticsearch.painless.symbol.ScriptRoot;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
-import java.util.Set;
 
 /**
  * Represents an array instantiation.
  */
-public final class ENewArray extends AExpression {
+public class ENewArray extends AExpression {
 
-    private final String type;
-    private final List<AExpression> arguments;
-    private final boolean initialize;
+    private final String canonicalTypeName;
+    private final List<AExpression> valueNodes;
+    private final boolean isInitializer;
 
-    public ENewArray(Location location, String type, List<AExpression> arguments, boolean initialize) {
-        super(location);
+    public ENewArray(int identifier, Location location, String canonicalTypeName, List<AExpression> valueNodes, boolean isInitializer) {
+        super(identifier, location);
 
-        this.type = Objects.requireNonNull(type);
-        this.arguments = Objects.requireNonNull(arguments);
-        this.initialize = initialize;
+        this.canonicalTypeName = Objects.requireNonNull(canonicalTypeName);
+        this.valueNodes = Collections.unmodifiableList(Objects.requireNonNull(valueNodes));
+        this.isInitializer = isInitializer;
+    }
+
+    public String getCanonicalTypeName() {
+        return canonicalTypeName;
+    }
+
+    public List<AExpression> getValueNodes() {
+        return valueNodes;
+    }
+
+    public boolean isInitializer() {
+        return isInitializer;
     }
 
     @Override
-    void extractVariables(Set<String> variables) {
-        for (AExpression argument : arguments) {
-            argument.extractVariables(variables);
-        }
-    }
-
-    @Override
-    void analyze(Locals locals) {
-         if (!read) {
-            throw createError(new IllegalArgumentException("A newly created array must be read from."));
+    Output analyze(ClassNode classNode, ScriptRoot scriptRoot, Scope scope, Input input) {
+        if (input.write) {
+            throw createError(new IllegalArgumentException("invalid assignment: cannot assign a value to new array"));
         }
 
-        final Type type;
-
-        try {
-            type = locals.getDefinition().getType(this.type);
-        } catch (IllegalArgumentException exception) {
-            throw createError(new IllegalArgumentException("Not a type [" + this.type + "]."));
+        if (input.read == false) {
+            throw createError(new IllegalArgumentException("not a statement: result not used from new array"));
         }
 
-        for (int argument = 0; argument < arguments.size(); ++argument) {
-            AExpression expression = arguments.get(argument);
+        Output output = new Output();
 
-            expression.expected = initialize ? locals.getDefinition().getType(type.struct, 0)
-                    : Definition.INT_TYPE;
-            expression.internal = true;
-            expression.analyze(locals);
-            arguments.set(argument, expression.cast(locals));
+        Class<?> clazz = scriptRoot.getPainlessLookup().canonicalTypeNameToType(canonicalTypeName);
+
+        if (clazz == null) {
+            throw createError(new IllegalArgumentException("Not a type [" + canonicalTypeName + "]."));
         }
 
-        actual = locals.getDefinition().getType(type.struct, initialize ? 1 : arguments.size());
-    }
+        List<Output> argumentOutputs = new ArrayList<>();
+        List<PainlessCast> argumentCasts = new ArrayList<>();
 
-    @Override
-    void write(MethodWriter writer, Globals globals) {
-        writer.writeDebugInfo(location);
-
-        if (initialize) {
-            writer.push(arguments.size());
-            writer.newArray(actual.struct.type);
-
-            for (int index = 0; index < arguments.size(); ++index) {
-                AExpression argument = arguments.get(index);
-
-                writer.dup();
-                writer.push(index);
-                argument.write(writer, globals);
-                writer.arrayStore(actual.struct.type);
-            }
-        } else {
-            for (AExpression argument : arguments) {
-                argument.write(writer, globals);
-            }
-
-            if (arguments.size() > 1) {
-                writer.visitMultiANewArrayInsn(actual.type.getDescriptor(), actual.type.getDimensions());
-            } else {
-                writer.newArray(actual.struct.type);
-            }
+        for (AExpression expression : valueNodes) {
+            Input expressionInput = new Input();
+            expressionInput.expected = isInitializer ? clazz.getComponentType() : int.class;
+            expressionInput.internal = true;
+            Output expressionOutput = analyze(expression, classNode, scriptRoot, scope, expressionInput);
+            argumentOutputs.add(expressionOutput);
+            argumentCasts.add(AnalyzerCaster.getLegalCast(expression.getLocation(),
+                    expressionOutput.actual, expressionInput.expected, expressionInput.explicit, expressionInput.internal));
         }
-    }
 
-    @Override
-    public String toString() {
-        return singleLineToStringWithOptionalArgs(arguments, type, initialize ? "init" : "dims");
+        output.actual = clazz;
+
+        NewArrayNode newArrayNode = new NewArrayNode();
+
+        for (int i = 0; i < valueNodes.size(); ++ i) {
+            newArrayNode.addArgumentNode(cast(argumentOutputs.get(i).expressionNode, argumentCasts.get(i)));
+        }
+
+        newArrayNode.setLocation(getLocation());
+        newArrayNode.setExpressionType(output.actual);
+        newArrayNode.setInitialize(isInitializer);
+
+        output.expressionNode = newArrayNode;
+
+        return output;
     }
 }

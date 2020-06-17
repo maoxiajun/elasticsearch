@@ -29,12 +29,14 @@ dependencies {
   compile 'org.ow2.asm:asm-commons:5.0.4'
   compile 'org.ow2.asm:asm-tree:5.0.4'
 }
+restResources {
+  restApi {
+    includeCore '_common', 'indices', 'index', 'cluster', 'nodes', 'search'
+  }
+}
 
 dependencyLicenses {
   mapping from: /lucene-.*/, to: 'lucene'
   mapping from: /asm-.*/, to: 'asm'
 }
 
-integTestCluster {
-  setting 'script.max_compilations_per_minute', '1000'
-}

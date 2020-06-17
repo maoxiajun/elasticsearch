@@ -19,87 +19,93 @@
 
 package org.elasticsearch.painless.node;
 
-import org.elasticsearch.painless.Definition;
-import org.elasticsearch.painless.Definition.Method;
-import org.elasticsearch.painless.Definition.MethodKey;
-import org.elasticsearch.painless.Globals;
-import org.elasticsearch.painless.Locals;
+import org.elasticsearch.painless.AnalyzerCaster;
 import org.elasticsearch.painless.Location;
-import org.elasticsearch.painless.MethodWriter;
+import org.elasticsearch.painless.Scope;
+import org.elasticsearch.painless.ir.ClassNode;
+import org.elasticsearch.painless.ir.ListInitializationNode;
+import org.elasticsearch.painless.lookup.PainlessCast;
+import org.elasticsearch.painless.lookup.PainlessConstructor;
+import org.elasticsearch.painless.lookup.PainlessMethod;
+import org.elasticsearch.painless.lookup.def;
+import org.elasticsearch.painless.symbol.ScriptRoot;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
-import java.util.Set;
+import java.util.Objects;
+
+import static org.elasticsearch.painless.lookup.PainlessLookupUtility.typeToCanonicalTypeName;
 
 /**
  * Represents a list initialization shortcut.
  */
-public final class EListInit extends AExpression {
-    private final List<AExpression> values;
+public class EListInit extends AExpression {
 
-    private Method constructor = null;
-    private Method method = null;
+    private final List<AExpression> valueNodes;
 
-    public EListInit(Location location, List<AExpression> values) {
-        super(location);
+    public EListInit(int identifier, Location location, List<AExpression> valueNodes) {
+        super(identifier, location);
 
-        this.values = values;
+        this.valueNodes = Collections.unmodifiableList(Objects.requireNonNull(valueNodes));
+    }
+
+    public List<AExpression> getValueNodes() {
+        return valueNodes;
     }
 
     @Override
-    void extractVariables(Set<String> variables) {
-        for (AExpression value : values) {
-            value.extractVariables(variables);
-        }
-    }
-
-    @Override
-    void analyze(Locals locals) {
-        if (!read) {
-            throw createError(new IllegalArgumentException("Must read from list initializer."));
+    Output analyze(ClassNode classNode, ScriptRoot scriptRoot, Scope scope, Input input) {
+        if (input.write) {
+            throw createError(new IllegalArgumentException("invalid assignment: cannot assign a value to list initializer"));
         }
 
-        actual = Definition.ARRAY_LIST_TYPE;
+        if (input.read == false) {
+            throw createError(new IllegalArgumentException("not a statement: result not used from list initializer"));
+        }
 
-        constructor = actual.struct.constructors.get(new MethodKey("<init>", 0));
+        Output output = new Output();
+        output.actual = ArrayList.class;
+
+        PainlessConstructor constructor = scriptRoot.getPainlessLookup().lookupPainlessConstructor(output.actual, 0);
 
         if (constructor == null) {
-            throw createError(new IllegalStateException("Illegal tree structure."));
+            throw createError(new IllegalArgumentException(
+                    "constructor [" + typeToCanonicalTypeName(output.actual) + ", <init>/0] not found"));
         }
 
-        method = actual.struct.methods.get(new MethodKey("add", 1));
+        PainlessMethod method = scriptRoot.getPainlessLookup().lookupPainlessMethod(output.actual, false, "add", 1);
 
         if (method == null) {
-            throw createError(new IllegalStateException("Illegal tree structure."));
+            throw createError(new IllegalArgumentException("method [" + typeToCanonicalTypeName(output.actual) + ", add/1] not found"));
         }
 
-        for (int index = 0; index < values.size(); ++index) {
-            AExpression expression = values.get(index);
+        List<Output> valueOutputs = new ArrayList<>(valueNodes.size());
+        List<PainlessCast> valueCasts = new ArrayList<>(valueNodes.size());
 
-            expression.expected = Definition.DEF_TYPE;
-            expression.internal = true;
-            expression.analyze(locals);
-            values.set(index, expression.cast(locals));
+        for (AExpression expression : valueNodes) {
+            Input expressionInput = new Input();
+            expressionInput.expected = def.class;
+            expressionInput.internal = true;
+            Output expressionOutput = analyze(expression, classNode, scriptRoot, scope, expressionInput);
+            valueOutputs.add(expressionOutput);
+            valueCasts.add(AnalyzerCaster.getLegalCast(expression.getLocation(),
+                    expressionOutput.actual, expressionInput.expected, expressionInput.explicit, expressionInput.internal));
         }
-    }
 
-    @Override
-    void write(MethodWriter writer, Globals globals) {
-        writer.writeDebugInfo(location);
+        ListInitializationNode listInitializationNode = new ListInitializationNode();
 
-        writer.newInstance(actual.type);
-        writer.dup();
-        writer.invokeConstructor(constructor.owner.type, constructor.method);
-
-        for (AExpression value : values) {
-            writer.dup();
-            value.write(writer, globals);
-            method.write(writer);
-            writer.pop();
+        for (int i = 0; i < valueNodes.size(); ++i) {
+            listInitializationNode.addArgumentNode(cast(valueOutputs.get(i).expressionNode, valueCasts.get(i)));
         }
-    }
 
-    @Override
-    public String toString() {
-        return singleLineToString(values);
+        listInitializationNode.setLocation(getLocation());
+        listInitializationNode.setExpressionType(output.actual);
+        listInitializationNode.setConstructor(constructor);
+        listInitializationNode.setMethod(method);
+
+        output.expressionNode = listInitializationNode;
+
+        return output;
     }
 }

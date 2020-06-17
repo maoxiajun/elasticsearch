@@ -19,96 +19,108 @@
 
 package org.elasticsearch.painless.node;
 
-import org.elasticsearch.painless.Definition;
-import org.elasticsearch.painless.Globals;
-import org.elasticsearch.painless.Definition.Type;
-import org.elasticsearch.painless.Location;
 import org.elasticsearch.painless.AnalyzerCaster;
-import org.elasticsearch.painless.Locals;
-import org.objectweb.asm.Label;
+import org.elasticsearch.painless.Location;
+import org.elasticsearch.painless.Scope;
+import org.elasticsearch.painless.ir.ClassNode;
+import org.elasticsearch.painless.ir.ConditionalNode;
+import org.elasticsearch.painless.lookup.PainlessCast;
+import org.elasticsearch.painless.lookup.PainlessLookupUtility;
+import org.elasticsearch.painless.symbol.ScriptRoot;
 
 import java.util.Objects;
-import java.util.Set;
-
-import org.elasticsearch.painless.MethodWriter;
-import org.objectweb.asm.Opcodes;
 
 /**
  * Represents a conditional expression.
  */
-public final class EConditional extends AExpression {
+public class EConditional extends AExpression {
 
-    private AExpression condition;
-    private AExpression left;
-    private AExpression right;
+    private final AExpression conditionNode;
+    private final AExpression leftNode;
+    private final AExpression rightNode;
 
-    public EConditional(Location location, AExpression condition, AExpression left, AExpression right) {
-        super(location);
+    public EConditional(int identifier, Location location, AExpression conditionNode, AExpression leftNode, AExpression rightNode) {
+        super(identifier, location);
 
-        this.condition = Objects.requireNonNull(condition);
-        this.left = Objects.requireNonNull(left);
-        this.right = Objects.requireNonNull(right);
+        this.conditionNode = Objects.requireNonNull(conditionNode);
+        this.leftNode = Objects.requireNonNull(leftNode);
+        this.rightNode = Objects.requireNonNull(rightNode);
+    }
+
+    public AExpression getConditionNode() {
+        return conditionNode;
+    }
+
+    public AExpression getLeftNode() {
+        return leftNode;
+    }
+
+    public AExpression getRightNode() {
+        return rightNode;
     }
 
     @Override
-    void extractVariables(Set<String> variables) {
-        condition.extractVariables(variables);
-        left.extractVariables(variables);
-        right.extractVariables(variables);
-    }
-
-    @Override
-    void analyze(Locals locals) {
-        condition.expected = Definition.BOOLEAN_TYPE;
-        condition.analyze(locals);
-        condition = condition.cast(locals);
-
-        if (condition.constant != null) {
-            throw createError(new IllegalArgumentException("Extraneous conditional statement."));
+    Output analyze(ClassNode classNode, ScriptRoot scriptRoot, Scope scope, Input input) {
+        if (input.write) {
+            throw createError(new IllegalArgumentException("invalid assignment: cannot assign a value to conditional operation [?:]"));
         }
 
-        left.expected = expected;
-        left.explicit = explicit;
-        left.internal = internal;
-        right.expected = expected;
-        right.explicit = explicit;
-        right.internal = internal;
-        actual = expected;
-
-        left.analyze(locals);
-        right.analyze(locals);
-
-        if (expected == null) {
-            final Type promote = AnalyzerCaster.promoteConditional(left.actual, right.actual, left.constant, right.constant);
-
-            left.expected = promote;
-            right.expected = promote;
-            actual = promote;
+        if (input.read == false) {
+            throw createError(new IllegalArgumentException("not a statement: result not used from conditional operation [?:]"));
         }
 
-        left = left.cast(locals);
-        right = right.cast(locals);
-    }
+        Output output = new Output();
 
-    @Override
-    void write(MethodWriter writer, Globals globals) {
-        writer.writeDebugInfo(location);
+        Input conditionInput = new Input();
+        conditionInput.expected = boolean.class;
+        Output conditionOutput = analyze(conditionNode, classNode, scriptRoot, scope, conditionInput);
+        PainlessCast conditionCast = AnalyzerCaster.getLegalCast(classNode.getLocation(),
+                conditionOutput.actual, conditionInput.expected, conditionInput.explicit, conditionInput.internal);
 
-        Label fals = new Label();
-        Label end = new Label();
+        Input leftInput = new Input();
+        leftInput.expected = input.expected;
+        leftInput.explicit = input.explicit;
+        leftInput.internal = input.internal;
+        Output leftOutput = analyze(leftNode, classNode, scriptRoot, scope, leftInput);
 
-        condition.write(writer, globals);
-        writer.ifZCmp(Opcodes.IFEQ, fals);
+        Input rightInput = new Input();
+        rightInput.expected = input.expected;
+        rightInput.explicit = input.explicit;
+        rightInput.internal = input.internal;
+        Output rightOutput = analyze(rightNode, classNode, scriptRoot, scope, rightInput);
 
-        left.write(writer, globals);
-        writer.goTo(end);
-        writer.mark(fals);
-        right.write(writer, globals);
-        writer.mark(end);
-    }
+        output.actual = input.expected;
 
-    @Override
-    public String toString() {
-        return singleLineToString(condition, left, right);
+        if (input.expected == null) {
+            Class<?> promote = AnalyzerCaster.promoteConditional(leftOutput.actual, rightOutput.actual);
+
+            if (promote == null) {
+                throw createError(new ClassCastException("cannot apply the conditional operator [?:] to the types " +
+                        "[" + PainlessLookupUtility.typeToCanonicalTypeName(leftOutput.actual) + "] and " +
+                        "[" + PainlessLookupUtility.typeToCanonicalTypeName(rightOutput.actual) + "]"));
+            }
+
+            leftInput.expected = promote;
+            rightInput.expected = promote;
+            output.actual = promote;
+        }
+
+        PainlessCast leftCast = AnalyzerCaster.getLegalCast(leftNode.getLocation(),
+                leftOutput.actual, leftInput.expected, leftInput.explicit, leftInput.internal);
+        PainlessCast rightCast = AnalyzerCaster.getLegalCast(rightNode.getLocation(),
+                rightOutput.actual, rightInput.expected, rightInput.explicit, rightInput.internal);
+
+        ConditionalNode conditionalNode = new ConditionalNode();
+
+        conditionalNode.setLeftNode(cast(leftOutput.expressionNode, leftCast));
+        conditionalNode.setRightNode(cast(rightOutput.expressionNode, rightCast));
+        conditionalNode.setConditionNode(cast(conditionOutput.expressionNode, conditionCast));
+
+        conditionalNode.setLocation(getLocation());
+        conditionalNode.setExpressionType(output.actual);
+
+        output.expressionNode = conditionalNode;
+
+        return output;
     }
 }

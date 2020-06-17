@@ -19,106 +19,84 @@
 
 package org.elasticsearch.painless.node;
 
-import org.elasticsearch.painless.Definition.Type;
-import org.elasticsearch.painless.Globals;
-import org.elasticsearch.painless.Locals;
-import org.elasticsearch.painless.Locals.Variable;
 import org.elasticsearch.painless.Location;
-import org.elasticsearch.painless.MethodWriter;
-import org.objectweb.asm.Label;
-import org.objectweb.asm.Opcodes;
+import org.elasticsearch.painless.Scope;
+import org.elasticsearch.painless.ir.BlockNode;
+import org.elasticsearch.painless.ir.CatchNode;
+import org.elasticsearch.painless.ir.ClassNode;
+import org.elasticsearch.painless.ir.DeclarationNode;
+import org.elasticsearch.painless.lookup.PainlessLookupUtility;
+import org.elasticsearch.painless.symbol.ScriptRoot;
 
 import java.util.Objects;
-import java.util.Set;
 
 /**
  * Represents a catch block as part of a try-catch block.
  */
-public final class SCatch extends AStatement {
+public class SCatch extends AStatement {
 
-    private final String type;
-    private final String name;
-    private final SBlock block;
+    private final Class<?> baseException;
+    private final SDeclaration declarationNode;
+    private final SBlock blockNode;
 
-    private Variable variable = null;
+    public SCatch(int identifier, Location location, Class<?> baseException, SDeclaration declarationNode, SBlock blockNode) {
+        super(identifier, location);
 
-    Label begin = null;
-    Label end = null;
-    Label exception = null;
+        this.baseException = Objects.requireNonNull(baseException);
+        this.declarationNode = Objects.requireNonNull(declarationNode);
+        this.blockNode = blockNode;
+    }
 
-    public SCatch(Location location, String type, String name, SBlock block) {
-        super(location);
+    public Class<?> getBaseException() {
+        return baseException;
+    }
 
-        this.type = Objects.requireNonNull(type);
-        this.name = Objects.requireNonNull(name);
-        this.block = block;
+    public SDeclaration getDeclarationNode() {
+        return declarationNode;
+    }
+
+    public SBlock getBlockNode() {
+        return blockNode;
     }
 
     @Override
-    void extractVariables(Set<String> variables) {
-        variables.add(name);
+    Output analyze(ClassNode classNode, ScriptRoot scriptRoot, Scope scope, Input input) {
+        Output output = new Output();
 
-        if (block != null) {
-            block.extractVariables(variables);
-        }
-    }
+        Output declarationOutput = declarationNode.analyze(classNode, scriptRoot, scope, new Input());
 
-    @Override
-    void analyze(Locals locals) {
-        final Type type;
+        Class<?> type = scope.getVariable(getLocation(), declarationNode.getSymbol()).getType();
 
-        try {
-            type = locals.getDefinition().getType(this.type);
-        } catch (IllegalArgumentException exception) {
-            throw createError(new IllegalArgumentException("Not a type [" + this.type + "]."));
+        if (baseException.isAssignableFrom(type) == false) {
+            throw createError(new ClassCastException(
+                    "cannot cast from [" + PainlessLookupUtility.typeToCanonicalTypeName(type) + "] " +
+                    "to [" + PainlessLookupUtility.typeToCanonicalTypeName(baseException) + "]"));
         }
 
-        if (!Exception.class.isAssignableFrom(type.clazz)) {
-            throw createError(new ClassCastException("Not an exception type [" + this.type + "]."));
+        Output blockOutput = null;
+
+        if (blockNode != null) {
+            Input blockInput = new Input();
+            blockInput.lastSource = input.lastSource;
+            blockInput.inLoop = input.inLoop;
+            blockInput.lastLoop = input.lastLoop;
+            blockOutput = blockNode.analyze(classNode, scriptRoot, scope, blockInput);
+
+            output.methodEscape = blockOutput.methodEscape;
+            output.loopEscape = blockOutput.loopEscape;
+            output.allEscape = blockOutput.allEscape;
+            output.anyContinue = blockOutput.anyContinue;
+            output.anyBreak = blockOutput.anyBreak;
+            output.statementCount = blockOutput.statementCount;
         }
 
-        variable = locals.addVariable(location, type, name, true);
+        CatchNode catchNode = new CatchNode();
+        catchNode.setDeclarationNode((DeclarationNode)declarationOutput.statementNode);
+        catchNode.setBlockNode(blockOutput == null ? null : (BlockNode)blockOutput.statementNode);
+        catchNode.setLocation(getLocation());
 
-        if (block != null) {
-            block.lastSource = lastSource;
-            block.inLoop = inLoop;
-            block.lastLoop = lastLoop;
+        output.statementNode = catchNode;
 
-            block.analyze(locals);
-
-            methodEscape = block.methodEscape;
-            loopEscape = block.loopEscape;
-            allEscape = block.allEscape;
-            anyContinue = block.anyContinue;
-            anyBreak = block.anyBreak;
-            statementCount = block.statementCount;
-        }
-    }
-
-    @Override
-    void write(MethodWriter writer, Globals globals) {
-        writer.writeStatementOffset(location);
-
-        Label jump = new Label();
-
-        writer.mark(jump);
-        writer.visitVarInsn(variable.type.type.getOpcode(Opcodes.ISTORE), variable.getSlot());
-
-        if (block != null) {
-            block.continu = continu;
-            block.brake = brake;
-            block.write(writer, globals);
-        }
-
-        writer.visitTryCatchBlock(begin, end, jump, variable.type.type.getInternalName());
-
-        if (exception != null && !block.allEscape) {
-            writer.goTo(exception);
-        }
-    }
-
-    @Override
-    public String toString() {
-        return singleLineToString(type, name, block);
+        return output;
     }
 }

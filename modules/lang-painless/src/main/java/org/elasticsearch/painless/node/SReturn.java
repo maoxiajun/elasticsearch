@@ -19,55 +19,66 @@
 
 package org.elasticsearch.painless.node;
 
-import org.elasticsearch.painless.Globals;
-import org.elasticsearch.painless.Locals;
+import org.elasticsearch.painless.AnalyzerCaster;
 import org.elasticsearch.painless.Location;
-import org.elasticsearch.painless.MethodWriter;
-
-import java.util.Objects;
-import java.util.Set;
+import org.elasticsearch.painless.Scope;
+import org.elasticsearch.painless.ir.ClassNode;
+import org.elasticsearch.painless.ir.ReturnNode;
+import org.elasticsearch.painless.lookup.PainlessCast;
+import org.elasticsearch.painless.lookup.PainlessLookupUtility;
+import org.elasticsearch.painless.symbol.ScriptRoot;
 
 /**
  * Represents a return statement.
  */
-public final class SReturn extends AStatement {
+public class SReturn extends AStatement {
 
-    private AExpression expression;
+    private final AExpression expressionNode;
 
-    public SReturn(Location location, AExpression expression) {
-        super(location);
+    public SReturn(int identifier, Location location, AExpression expressionNode) {
+        super(identifier, location);
 
-        this.expression = Objects.requireNonNull(expression);
+        this.expressionNode = expressionNode;
+    }
+
+    public AExpression getExpressionNode() {
+        return expressionNode;
     }
 
     @Override
-    void extractVariables(Set<String> variables) {
-        expression.extractVariables(variables);
-    }
+    Output analyze(ClassNode classNode, ScriptRoot scriptRoot, Scope scope, Input input) {
+        Output output = new Output();
 
-    @Override
-    void analyze(Locals locals) {
-        expression.expected = locals.getReturnType();
-        expression.internal = true;
-        expression.analyze(locals);
-        expression = expression.cast(locals);
+        AExpression.Output expressionOutput = null;
+        PainlessCast expressionCast = null;
 
-        methodEscape = true;
-        loopEscape = true;
-        allEscape = true;
+        if (expressionNode == null) {
+            if (scope.getReturnType() != void.class) {
+                throw getLocation().createError(new ClassCastException("Cannot cast from " +
+                        "[" + scope.getReturnCanonicalTypeName() + "] to " +
+                        "[" + PainlessLookupUtility.typeToCanonicalTypeName(void.class) + "]."));
+            }
+        } else {
+            AExpression.Input expressionInput = new AExpression.Input();
+            expressionInput.expected = scope.getReturnType();
+            expressionInput.internal = true;
+            expressionOutput = AExpression.analyze(expressionNode, classNode, scriptRoot, scope, expressionInput);
+            expressionCast = AnalyzerCaster.getLegalCast(expressionNode.getLocation(),
+                    expressionOutput.actual, expressionInput.expected, expressionInput.explicit, expressionInput.internal);
+        }
 
-        statementCount = 1;
-    }
+        output.methodEscape = true;
+        output.loopEscape = true;
+        output.allEscape = true;
 
-    @Override
-    void write(MethodWriter writer, Globals globals) {
-        writer.writeStatementOffset(location);
-        expression.write(writer, globals);
-        writer.returnValue();
-    }
+        output.statementCount = 1;
 
-    @Override
-    public String toString() {
-        return singleLineToString(expression); 
+        ReturnNode returnNode = new ReturnNode();
+        returnNode.setExpressionNode(expressionNode == null ? null : AExpression.cast(expressionOutput.expressionNode, expressionCast));
+        returnNode.setLocation(getLocation());
+
+        output.statementNode = returnNode;
+
+        return output;
     }
 }

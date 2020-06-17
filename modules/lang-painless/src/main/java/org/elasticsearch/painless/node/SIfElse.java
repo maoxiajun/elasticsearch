@@ -19,121 +19,102 @@
 
 package org.elasticsearch.painless.node;
 
-import org.elasticsearch.painless.Definition;
-import org.elasticsearch.painless.Globals;
-import org.elasticsearch.painless.Locals;
+import org.elasticsearch.painless.AnalyzerCaster;
 import org.elasticsearch.painless.Location;
-import org.elasticsearch.painless.MethodWriter;
-import org.objectweb.asm.Label;
-import org.objectweb.asm.Opcodes;
+import org.elasticsearch.painless.Scope;
+import org.elasticsearch.painless.ir.BlockNode;
+import org.elasticsearch.painless.ir.ClassNode;
+import org.elasticsearch.painless.ir.IfElseNode;
+import org.elasticsearch.painless.lookup.PainlessCast;
+import org.elasticsearch.painless.symbol.ScriptRoot;
 
-import java.util.Arrays;
 import java.util.Objects;
-import java.util.Set;
-
-import static java.util.Collections.singleton;
 
 /**
  * Represents an if/else block.
  */
-public final class SIfElse extends AStatement {
+public class SIfElse extends AStatement {
 
-    private AExpression condition;
-    private final SBlock ifblock;
-    private final SBlock elseblock;
+    private final AExpression conditionNode;
+    private final SBlock ifblockNode;
+    private final SBlock elseblockNode;
 
-    public SIfElse(Location location, AExpression condition, SBlock ifblock, SBlock elseblock) {
-        super(location);
+    public SIfElse(int identifier, Location location, AExpression conditionNode, SBlock ifblockNode, SBlock elseblockNode) {
+        super(identifier, location);
 
-        this.condition = Objects.requireNonNull(condition);
-        this.ifblock = ifblock;
-        this.elseblock = elseblock;
+        this.conditionNode = Objects.requireNonNull(conditionNode);
+        this.ifblockNode = ifblockNode;
+        this.elseblockNode = elseblockNode;
+    }
+
+    public AExpression getConditionNode() {
+        return conditionNode;
+    }
+
+    public SBlock getIfblockNode() {
+        return ifblockNode;
+    }
+
+    public SBlock getElseblockNode() {
+        return elseblockNode;
     }
 
     @Override
-    void extractVariables(Set<String> variables) {
-        condition.extractVariables(variables);
+    Output analyze(ClassNode classNode, ScriptRoot scriptRoot, Scope scope, Input input) {
+        Output output = new Output();
 
-        if (ifblock != null) {
-            ifblock.extractVariables(variables);
-        }
+        AExpression.Input conditionInput = new AExpression.Input();
+        conditionInput.expected = boolean.class;
+        AExpression.Output conditionOutput = AExpression.analyze(conditionNode, classNode, scriptRoot, scope, conditionInput);
+        PainlessCast conditionCast = AnalyzerCaster.getLegalCast(conditionNode.getLocation(),
+                conditionOutput.actual, conditionInput.expected, conditionInput.explicit, conditionInput.internal);
 
-        if (elseblock != null) {
-            elseblock.extractVariables(variables);
-        }
-    }
 
-    @Override
-    void analyze(Locals locals) {
-        condition.expected = Definition.BOOLEAN_TYPE;
-        condition.analyze(locals);
-        condition = condition.cast(locals);
-
-        if (condition.constant != null) {
+        if (conditionNode instanceof EBoolean) {
             throw createError(new IllegalArgumentException("Extraneous if statement."));
         }
 
-        if (ifblock == null) {
+        if (ifblockNode == null) {
             throw createError(new IllegalArgumentException("Extraneous if statement."));
         }
 
-        ifblock.lastSource = lastSource;
-        ifblock.inLoop = inLoop;
-        ifblock.lastLoop = lastLoop;
+        Input ifblockInput = new Input();
+        ifblockInput.lastSource = input.lastSource;
+        ifblockInput.inLoop = input.inLoop;
+        ifblockInput.lastLoop = input.lastLoop;
 
-        ifblock.analyze(Locals.newLocalScope(locals));
+        Output ifblockOutput = ifblockNode.analyze(classNode, scriptRoot, scope.newLocalScope(), ifblockInput);
 
-        anyContinue = ifblock.anyContinue;
-        anyBreak = ifblock.anyBreak;
-        statementCount = ifblock.statementCount;
+        output.anyContinue = ifblockOutput.anyContinue;
+        output.anyBreak = ifblockOutput.anyBreak;
+        output.statementCount = ifblockOutput.statementCount;
 
-        if (elseblock == null) {
+        if (elseblockNode == null) {
             throw createError(new IllegalArgumentException("Extraneous else statement."));
         }
 
-        elseblock.lastSource = lastSource;
-        elseblock.inLoop = inLoop;
-        elseblock.lastLoop = lastLoop;
+        Input elseblockInput = new Input();
+        elseblockInput.lastSource = input.lastSource;
+        elseblockInput.inLoop = input.inLoop;
+        elseblockInput.lastLoop = input.lastLoop;
 
-        elseblock.analyze(Locals.newLocalScope(locals));
+        Output elseblockOutput = elseblockNode.analyze(classNode, scriptRoot, scope.newLocalScope(), elseblockInput);
 
-        methodEscape = ifblock.methodEscape && elseblock.methodEscape;
-        loopEscape = ifblock.loopEscape && elseblock.loopEscape;
-        allEscape = ifblock.allEscape && elseblock.allEscape;
-        anyContinue |= elseblock.anyContinue;
-        anyBreak |= elseblock.anyBreak;
-        statementCount = Math.max(ifblock.statementCount, elseblock.statementCount);
-    }
+        output.methodEscape = ifblockOutput.methodEscape && elseblockOutput.methodEscape;
+        output.loopEscape = ifblockOutput.loopEscape && elseblockOutput.loopEscape;
+        output.allEscape = ifblockOutput.allEscape && elseblockOutput.allEscape;
+        output.anyContinue |= elseblockOutput.anyContinue;
+        output.anyBreak |= elseblockOutput.anyBreak;
+        output.statementCount = Math.max(ifblockOutput.statementCount, elseblockOutput.statementCount);
 
-    @Override
-    void write(MethodWriter writer, Globals globals) {
-        writer.writeStatementOffset(location);
+        IfElseNode ifElseNode = new IfElseNode();
+        ifElseNode.setConditionNode(AExpression.cast(conditionOutput.expressionNode, conditionCast));
+        ifElseNode.setBlockNode((BlockNode)ifblockOutput.statementNode);
+        ifElseNode.setElseBlockNode((BlockNode)elseblockOutput.statementNode);
+        ifElseNode.setLocation(getLocation());
 
-        Label fals = new Label();
-        Label end = new Label();
+        output.statementNode = ifElseNode;
 
-        condition.write(writer, globals);
-        writer.ifZCmp(Opcodes.IFEQ, fals);
-
-        ifblock.continu = continu;
-        ifblock.brake = brake;
-        ifblock.write(writer, globals);
-
-        if (!ifblock.allEscape) {
-            writer.goTo(end);
-        }
-
-        writer.mark(fals);
-
-        elseblock.continu = continu;
-        elseblock.brake = brake;
-        elseblock.write(writer, globals);
-
-        writer.mark(end);
-    }
-
-    @Override
-    public String toString() {
-        return multilineToString(singleton(condition), Arrays.asList(ifblock, elseblock));
+        return output;
     }
 }
